@@ -1,66 +1,92 @@
 # main.py
+
 import threading
 import queue
 import time
 
 from config_parser import Config
-from udp_receivers import FrameReceiver, CoordsReceiver
 from classifier_worker import Classificator
 
 def main():
-    # Load configuration from config.ini
     config = Config()
 
-    # Create queues with size defined in the config
-    raw_queue = queue.Queue(maxsize=config.QUEUE_MAX_SIZE)
-    blurred_queue = queue.Queue(maxsize=config.QUEUE_MAX_SIZE)
+    # Core queues
+    raw_queue    = queue.Queue(maxsize=config.QUEUE_MAX_SIZE)
     coords_queue = queue.Queue(maxsize=config.QUEUE_MAX_SIZE)
 
-    # Barrier to synchronize threads: raw, blurred, and coordinate receivers
-    barrier = threading.Barrier(parties=3)
+    # Only in NVIDIA mode do we expect a blurred stream
+    if config.MODE == "NVIDIA":
+        from udp_receivers import FrameReceiver, CoordsReceiver
+        blurred_queue = queue.Queue(maxsize=config.QUEUE_MAX_SIZE)
+        barrier_parties = 3
+    else:
+        # RENESAS: use GStreamer receivers, no blurred_queue
+        from gst_receivers import VideoReceiver as FrameReceiver, MetaReceiver as CoordsReceiver
+        blurred_queue = None
+        barrier_parties = 2
 
-    # Create UDP receiver threads
-    raw_receiver = FrameReceiver(
-        ip=config.UDP_IP,
-        port=config.UDP_PORT_RAW,
-        frame_queue=raw_queue,
-        receiver_type="raw",
-        debug_path=config.RAW_DEBUG_PATH,
-        barrier=barrier,
-        process_delay=config.PROCESS_DELAY
-    )
+    barrier = threading.Barrier(parties=barrier_parties)
 
-    blurred_receiver = FrameReceiver(
-        ip=config.UDP_IP,
-        port=config.UDP_PORT_BLURRED,
-        frame_queue=blurred_queue,
-        receiver_type="blurred",
-        debug_path=config.BLUR_DEBUG_PATH,
-        barrier=barrier,
-        process_delay=config.PROCESS_DELAY
-    )
+    # Instantiate frame receiver
+    if config.MODE == "NVIDIA":
+        raw_receiver = FrameReceiver(
+            ip=config.UDP_IP,
+            port=config.UDP_PORT_RAW,
+            frame_queue=raw_queue,
+            receiver_type="raw",
+            debug_path=config.RAW_DEBUG_PATH,
+            barrier=barrier,
+            process_delay=config.PROCESS_DELAY,
+            debug=config.DEBUG
+        )
+        raw_receiver.start()
 
-    coords_receiver = CoordsReceiver(
-        ip=config.UDP_IP,
-        port=config.UDP_PORT_COORDS,
-        coords_queue=coords_queue,
-        barrier=barrier,
-        process_delay=config.PROCESS_DELAY
-    )
+        # Blurred receiver
+        blurred_receiver = FrameReceiver(
+            ip=config.UDP_IP,
+            port=config.UDP_PORT_BLURRED,
+            frame_queue=blurred_queue,
+            receiver_type="blurred",
+            debug_path=config.BLUR_DEBUG_PATH,
+            barrier=barrier,
+            process_delay=config.PROCESS_DELAY,
+            debug=config.DEBUG
+        )
+        blurred_receiver.start()
+    else:
+        # RENESAS uses GStreamer VideoReceiver
+        video_receiver = FrameReceiver(
+            config=config,
+            raw_queue=raw_queue,
+            barrier=barrier
+        )
+        video_receiver.start()
 
-    # Create and start the classification thread
-    classificator_thread = Classificator(
+    # Instantiate coords receiver (UDP or GStreamer)
+    if config.MODE == "NVIDIA":
+        coords_receiver = CoordsReceiver(
+            ip=config.UDP_IP,
+            port=config.UDP_PORT_COORDS,
+            coords_queue=coords_queue,
+            barrier=barrier,
+            process_delay=config.PROCESS_DELAY
+        )
+    else:
+        coords_receiver = CoordsReceiver(
+            config=config,
+            coords_queue=coords_queue,
+            barrier=barrier
+        )
+    coords_receiver.start()
+
+    # Start classification thread
+    classificator = Classificator(
         raw_queue=raw_queue,
         blurred_queue=blurred_queue,
         coords_queue=coords_queue,
         config=config
     )
-
-    # Start threads
-    raw_receiver.start()
-    blurred_receiver.start()
-    coords_receiver.start()
-    classificator_thread.start()
+    classificator.start()
 
     print("Receiver running. Press Ctrl+C to terminate.")
     try:

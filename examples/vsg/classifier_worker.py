@@ -30,112 +30,87 @@ def get_latest_frame(q):
 
 class Classificator(threading.Thread):
     """
-    Thread that retrieves raw frames, blurred frames (or generates them in RENESAS mode),
-    draws debug bounding boxes, classifies each region, and composites the final image.
+    Thread that retrieves raw frames and coords, generates a blurred version in-process,
+    runs classification on each bbox, and composites the final image.
     """
-    def __init__(self, raw_queue, blurred_queue, coords_queue, config):
+    def __init__(self, raw_queue, coords_queue, config):
         super().__init__(daemon=True)
         self.raw_queue         = raw_queue
-        self.blurred_queue     = blurred_queue
         self.coords_queue      = coords_queue
         self.config            = config
         self.active_image_path = config.ACTIVE_IMAGE_PATH
         self.coords_debug_path = config.COORDS_DEBUG_PATH
         self.process_delay     = config.PROCESS_DELAY
 
-          # Initialize the Edge Impulse model
-        if config.MODE == "NVIDIA":
-            self.runner = ImageImpulseRunner(config.EDGE_IMPULSE_MODEL_PATH_NVIDIA)
-        else:
-            self.runner = ImageImpulseRunner(config.EDGE_IMPULSE_MODEL_PATH_RENESAS)
-        self.model_info = self.runner.init()
-        print(f"Model Info: {self.model_info}")
+        # Initialize the Edge Impulse model runner
+        self.runner     = ImageImpulseRunner(config.EDGE_IMPULSE_MODEL_PATH)
+        self.runner.init()
 
     def classify_image(self, image):
-        """
-        Convert the image to grayscale, resize to 96×96,
-        flatten, and run the Edge Impulse classifier.
-        """
-        img_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        resized  = cv2.resize(img_gray, (96, 96))
+        """Preprocess and classify with Edge Impulse."""
+        gray    = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        resized = cv2.resize(gray, (96, 96))
         return self.runner.classify(resized.flatten().tolist())
 
-    def generate_blur_stream(self, raw_frame, bboxes):
-        """
-        For RENESAS mode when no blur UDP arrives,
-        apply Gaussian blur to each bbox region on a copy of the raw frame.
-        """
-        blurred = raw_frame.copy()
-        k = self.config.BLUR_KERNEL_SIZE
+    def generate_blur(self, raw, bboxes):
+        """Apply Gaussian blur over each bbox on a copy of the raw frame."""
+        out = raw.copy()
+        k   = self.config.BLUR_KERNEL_SIZE
         for x1, y1, x2, y2 in bboxes:
-            roi = raw_frame[y1:y2, x1:x2]
+            roi = raw[y1:y2, x1:x2]
             if roi.size == 0:
                 continue
-            blurred_roi = cv2.GaussianBlur(roi, (k, k), 0)
-            blurred[y1:y2, x1:x2] = blurred_roi
-        return blurred
+            out[y1:y2, x1:x2] = cv2.GaussianBlur(roi, (k, k), 0)
+        return out
 
     def run(self):
         while True:
             try:
-                coords_data = self.coords_queue.get(timeout=1)
-                raw_frame   = get_latest_frame(self.raw_queue)
-                if raw_frame is None:
+                coords = self.coords_queue.get(timeout=1)
+                raw    = get_latest_frame(self.raw_queue)
+                if raw is None:
                     continue
 
-                # Obtain or generate the blurred frame
-                if self.blurred_queue:
-                    blurred_frame = get_latest_frame(self.blurred_queue)
-                    if blurred_frame is None:
-                        continue
-                else:
-                    blurred_frame = self.generate_blur_stream(
-                        raw_frame, coords_data.get('bboxes', [])
-                    )
-
-                # Save and debug-print the blurred frame
-                save_frame(self.config.BLUR_DEBUG_PATH, blurred_frame)
+                # Generate blur in-process for both modes
+                blurred = self.generate_blur(raw, coords.get('bboxes', []))
+                save_frame(self.config.BLUR_DEBUG_PATH, blurred)
                 if self.config.DEBUG:
                     print(f"[DEBUG] Blurred JPEG → {self.config.BLUR_DEBUG_PATH}")
 
-                # Draw debug bounding boxes on raw frame
-                debug_frame = raw_frame.copy()
-                for x1, y1, x2, y2 in coords_data.get('bboxes', []):
-                    cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (0,255,0), 2)
-                save_frame(self.coords_debug_path, debug_frame)
+                # Draw debug bboxes
+                dbg = raw.copy()
+                for x1, y1, x2, y2 in coords.get('bboxes', []):
+                    cv2.rectangle(dbg, (x1, y1), (x2, y2), (0,255,0), 2)
+                save_frame(self.coords_debug_path, dbg)
                 if self.config.DEBUG:
-                    print(f"[DEBUG] BBoxes JPEG → {self.coords_debug_path}")
+                    print(f"[DEBUG] BBoxes JPEG → {self.config.COORDS_DEBUG_PATH}")
 
-                # Create the final composite: replace 'green' regions with blurred regions
-                final_frame = raw_frame.copy()
-                for x1, y1, x2, y2 in coords_data.get('bboxes', []):
-                    cropped = raw_frame[y1:y2, x1:x2]
-                    if cropped.size == 0:
+                # Composite based on classification
+                final = raw.copy()
+                for x1, y1, x2, y2 in coords.get('bboxes', []):
+                    crop = raw[y1:y2, x1:x2]
+                    if crop.size == 0:
                         continue
 
-                    start_time = time.time()
-                    result     = self.classify_image(cropped)
-                    inference_time = (time.time() - start_time) * 1000  # ms
+                    t0     = time.time()
+                    res    = self.classify_image(crop)
+                    t_ms   = (time.time() - t0) * 1000
+                    cls    = res.get("result", {}).get("classification", {})
+                    g, r   = cls.get("green",0), cls.get("red",0)
+                    label  = "green" if g >= r+0.5 else "red"
+                    conf   = cls.get(label,0)
 
-                    cl_dict = result.get("result", {}).get("classification", {})
-                    g = cl_dict.get("green", 0)
-                    r = cl_dict.get("red",   0)
-                    label = "green" if g >= r + 0.5 else "red"
-                    confidence = cl_dict.get(label, 0)
+                    print(f"Classification: {label.upper()} – Confidence: {conf:.2f}, Time: {t_ms:.0f} ms")
 
-                    print(f"Classification: {label.upper()} – Confidence: {confidence:.2f}, Time: {inference_time:.0f} ms")
+                    if label=="green":
+                        roi = blurred[y1:y2, x1:x2]
+                        if roi.shape==crop.shape:
+                            final[y1:y2, x1:x2] = roi
 
-                    if label == "green":
-                        region = blurred_frame[y1:y2, x1:x2]
-                        if region.shape == cropped.shape:
-                            final_frame[y1:y2, x1:x2] = region
-
-                # Save the composite result
-                save_frame(self.active_image_path, final_frame)
-                print(f"Saved composite frame to {self.active_image_path}")
-                # debug-print the active frame path
+                save_frame(self.active_image_path, final)
+                print(f"Saved composite frame to {self.config.ACTIVE_IMAGE_PATH}")
                 if self.config.DEBUG:
-                    print(f"[DEBUG] Active JPEG → {self.active_image_path}")
+                    print(f"[DEBUG] Active JPEG → {self.config.ACTIVE_IMAGE_PATH}")
 
             except (queue.Empty, threading.BrokenBarrierError):
                 continue

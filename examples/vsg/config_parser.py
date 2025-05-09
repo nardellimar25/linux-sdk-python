@@ -12,7 +12,6 @@ class Config:
         # Network Section
         self.UDP_IP           = self.parser.get("Network", "UDP_IP")
         self.UDP_PORT_RAW     = self.parser.getint("Network", "UDP_PORT_RAW")
-        self.UDP_PORT_BLURRED = self.parser.getint("Network", "UDP_PORT_BLURRED")
         self.UDP_PORT_COORDS  = self.parser.getint("Network", "UDP_PORT_COORDS")
 
         # Paths Section
@@ -32,5 +31,4 @@ class Config:
 
         # Device Section
         self.MODE = self.parser.get("Device", "MODE").upper()
-        if self.MODE == "RENESAS":
-            self.BLUR_KERNEL_SIZE = self.parser.getint("Renesas", "BLUR_KERNEL_SIZE")
+        self.BLUR_KERNEL_SIZE = self.parser.getint("General", "BLUR_KERNEL_SIZE")

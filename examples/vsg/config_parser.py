@@ -31,5 +31,4 @@ class Config:
 
         # Device Section
         self.MODE = self.parser.get("Device", "MODE").upper()
-        if self.MODE == "RENESAS":
-            self.BLUR_KERNEL_SIZE = self.parser.getint("Renesas", "BLUR_KERNEL_SIZE")
+        self.BLUR_KERNEL_SIZE = self.parser.getint("General", "BLUR_KERNEL_SIZE")

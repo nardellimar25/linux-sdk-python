@@ -41,10 +41,16 @@ class Classificator(threading.Thread):
         self.active_image_path = config.ACTIVE_IMAGE_PATH
         self.coords_debug_path = config.COORDS_DEBUG_PATH
         self.process_delay     = config.PROCESS_DELAY
+        self.blur_kernel_size = config.BLUR_KERNEL_SIZE
 
-        # Initialize the Edge Impulse model runner
-        self.runner     = ImageImpulseRunner(config.EDGE_IMPULSE_MODEL_PATH)
-        self.runner.init()
+          # Initialize the Edge Impulse model
+        if config.MODE == "NVIDIA":
+            self.runner = ImageImpulseRunner(config.EDGE_IMPULSE_MODEL_PATH_NVIDIA)
+        else:
+            self.runner = ImageImpulseRunner(config.EDGE_IMPULSE_MODEL_PATH_RENESAS)
+        self.model_info = self.runner.init()
+        print(f"Model Info: {self.model_info}")
+
 
     def classify_image(self, image):
         """Preprocess and classify with Edge Impulse."""
@@ -55,7 +61,7 @@ class Classificator(threading.Thread):
     def generate_blur(self, raw, bboxes):
         """Apply Gaussian blur over each bbox on a copy of the raw frame."""
         out = raw.copy()
-        k   = self.config.BLUR_KERNEL_SIZE
+        k   = self.blur_kernel_size
         for x1, y1, x2, y2 in bboxes:
             roi = raw[y1:y2, x1:x2]
             if roi.size == 0:

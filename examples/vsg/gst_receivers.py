@@ -1,10 +1,20 @@
 # gst_receivers.py
-
-import gi, threading, queue, struct
+import gi, threading, struct, time, queue
 import numpy as np
-from udp_receivers import save_frame
-gi.require_version('Gst', '1.0')
+import cv2
 from gi.repository import Gst, GLib
+
+def save_frame(file_path, frame, quality=80):
+    """Encode the frame to JPEG and save it to disk."""
+    ret, jpeg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    if ret:
+        try:
+            with open(file_path, 'wb') as f:
+                f.write(jpeg.tobytes())
+        except Exception as e:
+            print(f"Error writing {file_path}: {e}")
+    else:
+        print(f"Failed to encode frame for {file_path}.")
 
 class Detection:
     """Parses a single detection struct from bytes."""
@@ -20,7 +30,6 @@ class FrameMetadata:
     det_count_byte_size = struct.Struct(_count_struct).size
 
     def __init__(self, data):
-        # First two bytes = object count
         self.object_count = struct.unpack(self._count_struct, data[:self.det_count_byte_size])[0]
         self.objects = []
         offset = self.det_count_byte_size
@@ -60,7 +69,6 @@ class VideoReceiver(threading.Thread):
         frame = np.frombuffer(info.data, dtype=np.uint8).reshape((h, w, 3))
         buf.unmap(info)
 
-        # save debug JPEG
         save_frame(self.config.RAW_DEBUG_PATH, frame)
         if self.config.DEBUG:
             print(f"[DEBUG] Raw JPEG → {self.config.RAW_DEBUG_PATH}")
@@ -110,7 +118,6 @@ class MetaReceiver(threading.Thread):
         if not success:
             return Gst.FlowReturn.ERROR
 
-        # COPY the bytes before unmapping
         data = bytes(info.data)
         buf.unmap(info)
 

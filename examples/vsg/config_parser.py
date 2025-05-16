@@ -19,6 +19,9 @@ class Config:
         self.BLUR_DEBUG_PATH   = self.parser.get("Paths", "BLUR_DEBUG_PATH")
         self.COORDS_DEBUG_PATH = self.parser.get("Paths", "COORDS_DEBUG_PATH")
         self.ACTIVE_IMAGE_PATH = self.parser.get("Paths", "ACTIVE_IMAGE_PATH")
+        self.INPUT_DEBUG_PATH  = self.parser.get("Paths", "INPUT_DEBUG_PATH")
+        self.TEST_IMAGES_PATH   = self.parser.get("Paths", "TEST_IMAGES_PATH")
+        
 
         # Model Section
         self.EDGE_IMPULSE_MODEL_PATH_NVIDIA = self.parser.get("Model", "EDGE_IMPULSE_MODEL_PATH_NVIDIA")
@@ -28,6 +31,8 @@ class Config:
         self.PROCESS_DELAY  = self.parser.getfloat("General", "PROCESS_DELAY")
         self.QUEUE_MAX_SIZE = self.parser.getint("General", "QUEUE_MAX_SIZE")
         self.DEBUG          = self.parser.getboolean("General", "DEBUG")
+        self.SIMULATED_INPUT    = self.parser.getboolean("General", "SIMULATED_INPUT")
+        
 
         # Device Section
         self.MODE = self.parser.get("Device", "MODE").upper()

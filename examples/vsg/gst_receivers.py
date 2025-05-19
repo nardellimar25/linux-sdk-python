@@ -23,18 +23,20 @@ def save_frame(file_path, frame, quality=80):
         print(f"[ERROR] writing {file_path}: {e}")
 
 class Detection:
-    # uso big‐endian per corrispondere a struct.pack('>B4H', …)
-    _det_struct_pat = ">B4H"
-    byte_size      = struct.Struct(_det_struct_pat).size
+    """Parses a single detection struct from bytes."""
+    _det_struct_pat = "B4H"
+    byte_size = struct.Struct(_det_struct_pat).size
 
     def __init__(self, data):
         self.confidence, self.x1, self.y1, self.x2, self.y2 = struct.unpack(self._det_struct_pat, data)
 
 class FrameMetadata:
-    _count_struct       = ">H"
+    """Parses frame‐level metadata containing multiple Detection entries."""
+    _count_struct = "H"
     det_count_byte_size = struct.Struct(_count_struct).size
 
     def __init__(self, data):
+        # First two bytes = object count
         self.object_count = struct.unpack(self._count_struct, data[:self.det_count_byte_size])[0]
         self.objects = []
         offset = self.det_count_byte_size
@@ -47,6 +49,10 @@ class FrameMetadata:
                 break
 
 class VideoReceiver(threading.Thread):
+    """
+    Receives video frames via GStreamer, saves a debug image,
+    and puts the frame into the provided queue.
+    """
     def __init__(self, config, raw_queue, barrier):
         super().__init__(daemon=True)
         self.config    = config
@@ -58,17 +64,19 @@ class VideoReceiver(threading.Thread):
         if not sample:
             return Gst.FlowReturn.ERROR
 
-        # ESTRAGGO LE CAPS DAL sample, non dal buffer
+        buf  = sample.get_buffer()
         caps = sample.get_caps().get_structure(0)
-        w, h = caps.get_int('width')[1], caps.get_int('height')[1]
+        w    = caps.get_value('width')
+        h    = caps.get_value('height')
 
-        buf = sample.get_buffer()
         success, info = buf.map(Gst.MapFlags.READ)
         if not success:
             return Gst.FlowReturn.ERROR
+
         frame = np.frombuffer(info.data, dtype=np.uint8).reshape((h, w, 3))
         buf.unmap(info)
 
+        # save debug JPEG
         save_frame(self.config.RAW_DEBUG_PATH, frame)
         if self.config.DEBUG:
             print(f"[DEBUG] Raw JPEG → {self.config.RAW_DEBUG_PATH}")
@@ -81,24 +89,27 @@ class VideoReceiver(threading.Thread):
             self.barrier.wait(timeout=1)
         except:
             pass
+
         return Gst.FlowReturn.OK
 
     def run(self):
         Gst.init(None)
         video_desc = (
-            f'udpsrc address=0.0.0.0 port={self.config.UDP_PORT_RAW} '
-            'caps="application/x-rtp, media=video, encoding-name=H264, payload=96" '
-            '! rtph264depay ! avdec_h264 ! videoconvert ! '
-            'video/x-raw, format=RGB ! queue ! '
-            'appsink name=video_sink emit-signals=true max-buffers=1 drop=true'
+            f'udpsrc address=0.0.0.0 port={self.config.UDP_PORT_RAW} caps="application/x-rtp, media=video, '
+            'encoding-name=H264, payload=96" ! rtph264depay ! avdec_h264 ! videoconvert ! '
+            'video/x-raw, format=RGB ! appsink name=video_sink emit-signals=true max-buffers=1 drop=true'
         )
         pipeline = Gst.parse_launch(video_desc)
         sink     = pipeline.get_by_name("video_sink")
         sink.connect("new-sample", self.on_new_sample)
+
         pipeline.set_state(Gst.State.PLAYING)
         GLib.MainLoop().run()
 
 class MetaReceiver(threading.Thread):
+    """
+    Receives metadata via GStreamer, parses bboxes, and puts them into the coords queue.
+    """
     def __init__(self, config, coords_queue, barrier):
         super().__init__(daemon=True)
         self.config       = config
@@ -110,38 +121,40 @@ class MetaReceiver(threading.Thread):
         if not sample:
             return Gst.FlowReturn.ERROR
 
-        buf = sample.get_buffer()
+        buf     = sample.get_buffer()
         success, info = buf.map(Gst.MapFlags.READ)
         if not success:
             return Gst.FlowReturn.ERROR
+
+        # COPY the bytes before unmapping
         data = bytes(info.data)
         buf.unmap(info)
 
-        # Debug: stampa dimensione e count corretto
-        print(f"[METADATA] Received {len(data)} bytes")
-        meta = FrameMetadata(data)
-        print(f"[METADATA] object_count = {meta.object_count}")
+        if len(data) >= FrameMetadata.det_count_byte_size:
+            meta   = FrameMetadata(data)
+            bboxes = [(o.x1, o.y1, o.x2, o.y2) for o in meta.objects]
 
-        bboxes = [(o.x1, o.y1, o.x2, o.y2) for o in meta.objects]
-        if self.coords_queue.full():
-            self.coords_queue.get_nowait()
-        self.coords_queue.put({'bboxes': bboxes})
+            if self.coords_queue.full():
+                self.coords_queue.get_nowait()
+            self.coords_queue.put({'bboxes': bboxes})
 
-        try:
-            self.barrier.wait(timeout=1)
-        except:
-            pass
+            try:
+                self.barrier.wait(timeout=1)
+            except:
+                pass
+
         return Gst.FlowReturn.OK
 
     def run(self):
         Gst.init(None)
         meta_desc = (
             f'udpsrc address=0.0.0.0 port={self.config.UDP_PORT_COORDS} '
-            'caps="application/x-meta, media=meta" ! queue ! '
+            'caps="application/x-meta, media=meta" ! '
             'appsink name=meta_sink emit-signals=true max-buffers=1 drop=true'
         )
         pipeline = Gst.parse_launch(meta_desc)
         sink     = pipeline.get_by_name("meta_sink")
         sink.connect("new-sample", self.on_new_meta_sample)
+
         pipeline.set_state(Gst.State.PLAYING)
         GLib.MainLoop().run()

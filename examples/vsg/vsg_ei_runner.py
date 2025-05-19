@@ -1,3 +1,4 @@
+# main.py
 import threading
 import queue
 import time
@@ -7,6 +8,7 @@ import cv2
 from ultralytics import YOLO
 from config_parser import Config
 from classifier_worker import Classificator
+from gst_receivers import VideoReceiver, MetaReceiver
 
 class SimulatedReceiver(threading.Thread):
     """
@@ -79,51 +81,26 @@ def main():
     classifier.start()
 
     if config.SIMULATED_INPUT:
-        # Simulated input: folder-based person detection using Ultralytics YOLO
+        # Simulated input
         sim = SimulatedReceiver(raw_queue=raw_queue, coords_queue=coords_queue, config=config)
         sim.start()
     else:
-        # Original live input logic (UDP or GStreamer)
-        from threading import Barrier
-        barrier = Barrier(parties=2)
-        if config.MODE == "NVIDIA":
-            from udp_receivers import FrameReceiver, CoordsReceiver
+        # Live input via GStreamer for all modes
+        barrier = threading.Barrier(parties=2)
 
-            raw_recv = FrameReceiver(
-                ip=config.UDP_IP,
-                port=config.UDP_PORT_RAW,
-                frame_queue=raw_queue,
-                debug_path=config.RAW_DEBUG_PATH,
-                barrier=barrier,
-                process_delay=config.PROCESS_DELAY,
-                debug=config.DEBUG
-            )
-            raw_recv.start()
+        vid_recv = VideoReceiver(
+            config=config,
+            raw_queue=raw_queue,
+            barrier=barrier
+        )
+        vid_recv.start()
 
-            coords_recv = CoordsReceiver(
-                ip=config.UDP_IP,
-                port=config.UDP_PORT_COORDS,
-                coords_queue=coords_queue,
-                barrier=barrier,
-                process_delay=config.PROCESS_DELAY
-            )
-            coords_recv.start()
-        else:
-            from gst_receivers import VideoReceiver, MetaReceiver
-
-            vid_recv = VideoReceiver(
-                config=config,
-                raw_queue=raw_queue,
-                barrier=barrier
-            )
-            vid_recv.start()
-
-            meta_recv = MetaReceiver(
-                config=config,
-                coords_queue=coords_queue,
-                barrier=barrier
-            )
-            meta_recv.start()
+        meta_recv = MetaReceiver(
+            config=config,
+            coords_queue=coords_queue,
+            barrier=barrier
+        )
+        meta_recv.start()
 
     print("Receiver running. Press Ctrl+C to terminate.")
     try:
@@ -131,6 +108,7 @@ def main():
             time.sleep(1)
     except KeyboardInterrupt:
         print("Terminating...")
+
 
 if __name__ == '__main__':
     main()

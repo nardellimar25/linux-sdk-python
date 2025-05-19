@@ -1,10 +1,26 @@
 # gst_receivers.py
 
-import gi, threading, queue, struct
-import numpy as np
-from udp_receivers import save_frame
+import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
+
+import threading
+import struct
+import time
+import queue
+import numpy as np
+import cv2
+
+def save_frame(file_path, frame, quality=80):
+    ret, jpeg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    if not ret:
+        print(f"[ERROR] Failed to encode frame for {file_path}.")
+        return
+    try:
+        with open(file_path, 'wb') as f:
+            f.write(jpeg.tobytes())
+    except Exception as e:
+        print(f"[ERROR] writing {file_path}: {e}")
 
 class Detection:
     """Parses a single detection struct from bytes."""

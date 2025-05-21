@@ -53,11 +53,12 @@ class VideoReceiver(threading.Thread):
     Receives video frames via GStreamer, saves a debug image,
     and puts the frame into the provided queue.
     """
-    def __init__(self, config, raw_queue, barrier):
+    def __init__(self, config, raw_queue, barrier,stop_event):
         super().__init__(daemon=True)
         self.config    = config
         self.raw_queue = raw_queue
         self.barrier   = barrier
+        self.stop_event = stop_event
 
     def on_new_sample(self, appsink):
         sample = appsink.emit("pull-sample")
@@ -97,24 +98,34 @@ class VideoReceiver(threading.Thread):
         video_desc = (
             f'udpsrc address=0.0.0.0 port={self.config.UDP_PORT_RAW} caps="application/x-rtp, media=video, '
             'encoding-name=H264, payload=96" ! rtph264depay ! avdec_h264 ! videoconvert ! '
-            'video/x-raw, format=RGB ! appsink name=video_sink emit-signals=true max-buffers=1 drop=true'
+            'video/x-raw, format=BGR ! appsink name=video_sink emit-signals=true max-buffers=1 drop=true'
         )
         pipeline = Gst.parse_launch(video_desc)
         sink     = pipeline.get_by_name("video_sink")
         sink.connect("new-sample", self.on_new_sample)
 
         pipeline.set_state(Gst.State.PLAYING)
-        GLib.MainLoop().run()
+        context = GLib.MainContext.default()
+
+        # Run GStreamer loop until stop_event
+        while not self.stop_event.is_set():
+            context.iteration(False)
+            time.sleep(0.01)
+
+        pipeline.set_state(Gst.State.NULL)
+        print("VideoReceiver stopping...")
+
 
 class MetaReceiver(threading.Thread):
     """
     Receives metadata via GStreamer, parses bboxes, and puts them into the coords queue.
     """
-    def __init__(self, config, coords_queue, barrier):
+    def __init__(self, config, coords_queue, barrier,stop_event):
         super().__init__(daemon=True)
         self.config       = config
         self.coords_queue = coords_queue
         self.barrier      = barrier
+        self.stop_event = stop_event
 
     def on_new_meta_sample(self, appsink):
         sample = appsink.emit("pull-sample")
@@ -157,4 +168,11 @@ class MetaReceiver(threading.Thread):
         sink.connect("new-sample", self.on_new_meta_sample)
 
         pipeline.set_state(Gst.State.PLAYING)
-        GLib.MainLoop().run()
+        context = GLib.MainContext.default()
+
+        while not self.stop_event.is_set():
+            context.iteration(False)
+            time.sleep(0.01)
+
+        pipeline.set_state(Gst.State.NULL)
+        print("MetaReceiver stopping...")

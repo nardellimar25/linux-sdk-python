@@ -32,6 +32,7 @@ class Config:
         self.QUEUE_MAX_SIZE = self.parser.getint("General", "QUEUE_MAX_SIZE")
         self.DEBUG          = self.parser.getboolean("General", "DEBUG")
         self.SIMULATED_INPUT    = self.parser.getboolean("General", "SIMULATED_INPUT")
+        self.DEMO = self.parser.getboolean("General", "DEMO")
         
 
         # Device Section

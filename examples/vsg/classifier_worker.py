@@ -1,15 +1,13 @@
 # classifier_worker.py
-
 import cv2
 import time
 import threading
 import queue
 from edge_impulse_linux.image import ImageImpulseRunner
 
+
 def save_frame(file_path, frame, quality=80):
-    """
-    Encode the frame to JPEG and save it to disk.
-    """
+    # Encode and save JPEG
     ret, jpeg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
     if ret:
         try:
@@ -20,10 +18,9 @@ def save_frame(file_path, frame, quality=80):
     else:
         print(f"Failed to encode frame for {file_path}.")
 
+
 def get_latest_frame(q):
-    """
-    Extract and return the most recent frame from the queue, discarding older ones.
-    """
+    # Drain queue and return the most recent frame
     latest = None
     while not q.empty():
         try:
@@ -32,60 +29,51 @@ def get_latest_frame(q):
             break
     return latest
 
+
 class Classificator(threading.Thread):
     """
-    Thread that pulls raw frames and bounding boxes, applies blur,
-    preprocesses images exactly as Edge Impulse Studio does,
-    runs classification, draws colored boxes, and saves the composite.
+    Worker thread that classifies person crops, applies blur based on label,
+    draws bounding boxes, saves to disk, and enqueues the final image for display.
     """
-    def __init__(self, raw_queue, coords_queue, config):
+    def __init__(self, raw_queue, coords_queue, display_queue, config, stop_event):
         super().__init__(daemon=True)
-        self.raw_queue = raw_queue
-        self.coords_queue = coords_queue
-        self.config = config
+        self.raw_queue     = raw_queue
+        self.coords_queue  = coords_queue
+        self.display_queue = display_queue
+        self.config        = config
         self.active_image_path = config.ACTIVE_IMAGE_PATH
         self.coords_debug_path = config.COORDS_DEBUG_PATH
-        self.input_debug_path = getattr(config, 'INPUT_DEBUG_PATH', None)
-        self.process_delay = config.PROCESS_DELAY
+        self.input_debug_path = config.INPUT_DEBUG_PATH
+        self.stop_event = stop_event
+        
         self.blur_kernel_size = config.BLUR_KERNEL_SIZE
-
-        # Initialize Edge Impulse runner
+        # Initialize Edge Impulse model runner
         model_path = (config.EDGE_IMPULSE_MODEL_PATH_NVIDIA 
                       if config.MODE == 'NVIDIA' 
                       else config.EDGE_IMPULSE_MODEL_PATH_RENESAS)
         self.runner = ImageImpulseRunner(model_path)
-        self.model_info = self.runner.init()
+        self.runner.init()
         if config.DEBUG:
             print(f"[DEBUG] Initialized runner with model: {model_path}")
 
+
     def classify_image(self, image):
-        """
-        Preprocess the input image using the same pipeline as Edge Impulse Studio,
-        extract features and classify directly.
-        """
-        # Convert from BGR (OpenCV default) to RGB
+        # Convert BGR to RGB and extract features/classify
         img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        # Extract features using auto-studio settings
         features, _ = self.runner.get_features_from_image_auto_studio_settings(img_rgb)
-
-        # Classify by passing the raw feature array
         return self.runner.classify(features)
 
     def generate_blur(self, frame, bboxes):
-        """
-        Create a blurred copy of the frame, blurring only inside each bbox.
-        """
         out = frame.copy()
         k = self.blur_kernel_size
         for x1, y1, x2, y2 in bboxes:
             roi = frame[y1:y2, x1:x2]
-            if roi.size > 0:
+            if roi.size:
                 out[y1:y2, x1:x2] = cv2.GaussianBlur(roi, (k, k), 0)
         return out
 
     def run(self):
-        while True:
+        while not self.stop_event.is_set():
             try:
                 coords = self.coords_queue.get(timeout=1)
                 raw = get_latest_frame(self.raw_queue)
@@ -105,53 +93,47 @@ class Classificator(threading.Thread):
                 save_frame(self.coords_debug_path, dbg)
                 if self.config.DEBUG:
                     print(f"[DEBUG] BBoxes JPEG → {self.config.COORDS_DEBUG_PATH}")
-
+                
                 final = raw.copy()
+
                 for x1, y1, x2, y2 in coords.get('bboxes', []):
                     crop = raw[y1:y2, x1:x2]
                     if crop.size == 0:
                         continue
-
+                    
                     # Debug: save classifier input
                     if self.input_debug_path:
                         save_frame(self.input_debug_path, crop)
                         if self.config.DEBUG:
                             print(f"[DEBUG] Classifier Input JPEG → {self.config.INPUT_DEBUG_PATH}")
 
-                    # Classify
-                    start = time.time()
                     try:
+                        # Classify crop and parse results
                         res = self.classify_image(crop)
+                        cls = res.get('result', {}).get('classification', {}) or {}
+                        label = max(('green','yellow','red'), key=lambda c: cls.get(c, 0.0))
                     except Exception as e:
-                        print(f"[ERROR] classify_image failed: {e}")
+                        print(f"[ERROR] Classification failed: {e}")
                         continue
-                    elapsed_ms = (time.time() - start) * 1000
 
-                    # Parse results safely
-                    cls = res.get('result', {}).get('classification', {}) or {}
-                    g = cls.get('green', 0.0)
-                    y_val = cls.get('yellow', 0.0)
-                    r = cls.get('red', 0.0)
-                    label = max(('green', 'yellow', 'red'), key=lambda c: cls.get(c, 0.0))
-                    conf = cls.get(label, 0.0)
-
-                    print(f"Classification → G:{g:.2f}, Y:{y_val:.2f}, R:{r:.2f} "
-                          f"→ {label.upper()} ({conf:.2f}), {elapsed_ms:.0f}ms")
-
-                    # Draw colored bbox and conditional blur
-                    colors = {'green': (0, 255, 0), 'yellow': (0, 255, 255), 'red': (0, 0, 255)}
-                    cv2.rectangle(final, (x1, y1), (x2, y2), colors[label], 2)
+                    # Draw colored box
+                    colors = {'green': (0,255,0), 'yellow': (0,255,255), 'red': (0,0,255)}
+                    cv2.rectangle(final, (x1,y1), (x2,y2), colors[label], 2)
+                    # If green, overlay blur
                     if label == 'green':
                         final[y1:y2, x1:x2] = blurred[y1:y2, x1:x2]
 
-                save_frame(self.active_image_path, final)
-                print(f"Saved composite frame to {self.config.ACTIVE_IMAGE_PATH}")
-                if self.config.DEBUG:
-                    print(f"[DEBUG] Active JPEG → {self.config.ACTIVE_IMAGE_PATH}")
+                # Save composite to disk
+                save_frame(self.config.ACTIVE_IMAGE_PATH, final)
 
-            except (queue.Empty, threading.BrokenBarrierError):
+                # Enqueue for display without blocking
+                try:
+                    self.display_queue.put_nowait(final)
+                except queue.Full:
+                    pass
+
+            except queue.Empty:
                 continue
             except Exception as e:
                 print(f"Exception in Classificator: {e}")
-
-            time.sleep(self.process_delay)
+            time.sleep(self.config.PROCESS_DELAY)

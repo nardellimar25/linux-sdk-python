@@ -13,6 +13,7 @@ class Config:
         self.UDP_IP           = self.parser.get("Network", "UDP_IP")
         self.UDP_PORT_RAW     = self.parser.getint("Network", "UDP_PORT_RAW")
         self.UDP_PORT_COORDS  = self.parser.getint("Network", "UDP_PORT_COORDS")
+        self.UDP_PORT_DEMO  = self.parser.getint("Network", "UDP_PORT_DEMO")
 
         # Paths Section
         self.RAW_DEBUG_PATH    = self.parser.get("Paths", "RAW_DEBUG_PATH")
@@ -38,3 +39,8 @@ class Config:
         # Device Section
         self.MODE = self.parser.get("Device", "MODE").upper()
         self.BLUR_KERNEL_SIZE = self.parser.getint("General", "BLUR_KERNEL_SIZE")
+
+        #Web Section
+        self.WWW_ROOT = self.parser.get("Web","WWW_ROOT")
+        self.FRAME_FILENAME = self.parser.get("Web","FRAME_FILENAME")
+        self.FRAME_SAVE_DELAY = self.parser.getfloat("Web","FRAME_SAVE_DELAY")

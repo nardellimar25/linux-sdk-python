@@ -1,65 +1,106 @@
-# main.py
 import threading
 import queue
 import time
 import os
 import cv2
+import json
 
 from ultralytics import YOLO
 from config_parser import Config
 from classifier_worker import Classificator
 from gst_receivers import VideoReceiver, MetaReceiver
 
-class DemoDisplay(threading.Thread):
+class FrameSaver(threading.Thread):
     """
-    Thread that displays the processed video stream in a single window.
-    It reads fully processed frames from `display_queue` and shows them.
-    Uses cv2.startWindowThread to avoid QBasicTimer warnings when using Qt backend.
+    Thread that:
+      1) drains display_queue (Edge Impulse outputs) and keeps only the latest frame,
+      2) measures incoming FPS from Edge Impulse,
+      3) dynamically adjusts its write delay so write-FPS ≃ 90% of Edge Impulse FPS,
+      4) saves the frame for IIS to serve,
+      5) writes a JSON metadata file with the current delay,
+      6) logs both input and output FPS once per second.
     """
-    def __init__(self, display_queue, stop_event):
+    def __init__(self, display_queue, stop_event, output_path, min_delay=0.01):
         super().__init__(daemon=True)
-        self.disp_q = display_queue
-        self.stop_event = stop_event
+        self.display_queue = display_queue
+        self.stop_event    = stop_event
+        self.output_path   = output_path
+        self.min_delay     = min_delay
+
+        # Counters & timers for measuring FPS
+        self.in_count   = 0
+        self.in_start   = time.time()
+        self.out_count  = 0
+        self.out_start  = time.time()
+
+        self.latest_frame  = None
+        self.current_delay = min_delay
 
     def run(self):
-        cv2.startWindowThread()
-        window_name = "VSG Video"
-        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-
+        meta_path = os.path.splitext(self.output_path)[0] + '_meta.json'
         while not self.stop_event.is_set():
+            now = time.time()
+
+            # 1) Drain all frames from Edge Impulse; count them
             try:
-                frame = self.disp_q.get(timeout=0.5)
+                while True:
+                    self.latest_frame = self.display_queue.get_nowait()
+                    self.in_count += 1
             except queue.Empty:
-                continue
+                pass
 
-            if frame is None:
-                continue
+            # 2) Every second, compute Edge Impulse FPS and update write delay
+            if now - self.in_start >= 1.0:
+                in_fps = self.in_count / (now - self.in_start)
+                target_out_fps    = max(1.0, in_fps * 0.9)
+                self.current_delay = 1.0 / target_out_fps
+                print(f"[FrameSaver] EdgeImpulse-FPS: {in_fps:.1f}, write-delay: {self.current_delay*1000:.1f} ms")
 
-            cv2.imshow(window_name, frame)
-            if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
-                break
+                # Write metadata JSON for browser polling
+                try:
+                    with open(meta_path, 'w') as f:
+                        json.dump({'delay_ms': round(self.current_delay * 1000, 1)}, f)
+                except Exception as e:
+                    print(f"[FrameSaver] ERROR writing meta file: {e}")
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+                self.in_count = 0
+                self.in_start = now
 
-        cv2.destroyAllWindows()
+            # 3) If we have a frame, write it to disk
+            if self.latest_frame is not None:
+                os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
+                success = cv2.imwrite(self.output_path, self.latest_frame)
+                if not success:
+                    print(f"[FrameSaver] ERROR writing frame to {self.output_path}")
+                self.out_count += 1
 
+            # 4) Every second, log actual write-FPS
+            if now - self.out_start >= 1.0:
+                out_fps = self.out_count / (now - self.out_start)
+                print(f"[FrameSaver] write-FPS: {out_fps:.1f} fps")
+                self.out_count = 0
+                self.out_start = now
+
+            # 5) Sleep the dynamically computed interval
+            time.sleep(self.current_delay)
+
+        print("FrameSaver stopping...")
 
 class SimulatedReceiver(threading.Thread):
     """
-    Simulates incoming frames by reading images from subfolders 'green', 'yellow', 'red'.
-    Uses Ultralytics YOLO model (default weights) to detect persons and crops those regions for classification.
+    Simulates incoming frames by reading images from 'green', 'yellow', 'red' subfolders.
+    Uses YOLO to detect persons, crops them, and sends them to the classifier.
     """
     def __init__(self, raw_queue, coords_queue, config, stop_event):
         super().__init__(daemon=True)
-        self.raw_q    = raw_queue
-        self.coords_q = coords_queue
-        self.config   = config
-        self.stop_event = stop_event
-        self.labels   = ['green', 'yellow', 'red']
-        self.root     = config.TEST_IMAGES_PATH
+        self.raw_queue    = raw_queue
+        self.coords_queue = coords_queue
+        self.config       = config
+        self.stop_event   = stop_event
+        self.labels       = ['green', 'yellow', 'red']
+        self.root         = config.TEST_IMAGES_PATH
 
-        self.model = YOLO('yolov8n.pt')
+        self.model          = YOLO('yolov8n.pt')
         self.conf_threshold = 0.5
         self.iou_threshold  = 0.45
 
@@ -71,18 +112,20 @@ class SimulatedReceiver(threading.Thread):
                 folder = os.path.join(self.root, label)
                 if not os.path.isdir(folder):
                     continue
-                for fn in os.listdir(folder):
+
+                for filename in os.listdir(folder):
                     if self.stop_event.is_set():
                         break
-                    if not fn.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    if not filename.lower().endswith(('.jpg', '.jpeg', '.png')):
                         continue
 
-                    img_path = os.path.join(folder, fn)
+                    img_path = os.path.join(folder, filename)
                     img = cv2.imread(img_path)
                     if img is None:
                         print(f"[SIM] Failed to load image: {img_path}")
                         continue
 
+                    # Run YOLO detection on the image
                     results = self.model(img, conf=self.conf_threshold, iou=self.iou_threshold)
                     for res in results:
                         for box in res.boxes:
@@ -93,15 +136,17 @@ class SimulatedReceiver(threading.Thread):
                             if crop.size == 0:
                                 continue
 
-                            if self.raw_q.full():
-                                self.raw_q.get_nowait()
-                            self.raw_q.put(crop)
-                            self.coords_q.put({'bboxes': [(0, 0, crop.shape[1], crop.shape[0])]})
+                            # Enqueue the crop and its bounding box
+                            if self.raw_queue.full():
+                                self.raw_queue.get_nowait()
+                            self.raw_queue.put(crop)
+                            self.coords_queue.put({
+                                'bboxes': [(0, 0, crop.shape[1], crop.shape[0])]
+                            })
 
-                            print(f"[SIM] Sent {label}/{fn} person crop to classifier")
+                            print(f"[SIM] Sent {label}/{filename} person crop to classifier")
                             time.sleep(self.config.PROCESS_DELAY)
         print("SimulatedReceiver stopping...")
-
 
 def main():
     config = Config()
@@ -109,10 +154,9 @@ def main():
     raw_queue     = queue.Queue(maxsize=config.QUEUE_MAX_SIZE)
     coords_queue  = queue.Queue(maxsize=config.QUEUE_MAX_SIZE)
     display_queue = queue.Queue(maxsize=config.QUEUE_MAX_SIZE)
+    stop_event    = threading.Event()
 
-    stop_event = threading.Event()
-
-    # Start the classification thread
+    # Start the classifier worker thread
     classifier = Classificator(
         raw_queue=raw_queue,
         coords_queue=coords_queue,
@@ -122,10 +166,18 @@ def main():
     )
     classifier.start()
 
+    # If demo mode is enabled, start the FrameSaver to write frames and metadata for IIS
     if config.DEMO:
-        demo = DemoDisplay(display_queue, stop_event)
-        demo.start()
+        output_path = os.path.join(config.WWW_ROOT, config.FRAME_FILENAME)
+        saver = FrameSaver(
+            display_queue=display_queue,
+            stop_event=stop_event,
+            output_path=output_path,
+            min_delay=config.FRAME_SAVE_DELAY
+        )
+        saver.start()
 
+    # Start simulated input or real GStreamer receivers
     if config.SIMULATED_INPUT:
         sim = SimulatedReceiver(
             raw_queue=raw_queue,
@@ -161,10 +213,10 @@ def main():
         print("Terminating...")
         stop_event.set()
 
-    # Join threads
+    # Join all threads before exiting
     classifier.join()
     if config.DEMO:
-        demo.join()
+        saver.join()
     if config.SIMULATED_INPUT:
         sim.join()
     else:
